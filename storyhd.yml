@@ -1,0 +1,508 @@
+name: Build StoryHD APK
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Tao source project
+        run: |
+          cat > settings.gradle.kts <<'STORYHD_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "StoryHD"
+          include(":app")
+          STORYHD_EOF
+          cat > build.gradle.kts <<'STORYHD_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          STORYHD_EOF
+          cat > gradle.properties <<'STORYHD_EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          STORYHD_EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'STORYHD_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.storyhd"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.storyhd"
+                  minSdk = 29
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("androidx.media3:media3-common:1.4.1")
+              implementation("androidx.media3:media3-effect:1.4.1")
+              implementation("androidx.media3:media3-transformer:1.4.1")
+          }
+          STORYHD_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'STORYHD_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Story HD"
+                  android:largeHeap="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          STORYHD_EOF
+          mkdir -p app/src/main/java/com/storyhd
+          cat > app/src/main/java/com/storyhd/MainActivity.kt <<'STORYHD_EOF'
+          package com.storyhd
+
+          import android.content.ContentValues
+          import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.ImageDecoder
+          import android.graphics.Paint
+          import android.graphics.RectF
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.MediaStore
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.compose.setContent
+          import androidx.activity.result.PickVisualMediaRequest
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.FilterChip
+          import androidx.compose.material3.LinearProgressIndicator
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.Slider
+          import androidx.compose.material3.Surface
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.unit.dp
+          import androidx.media3.common.Effect
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MimeTypes
+          import androidx.media3.common.audio.AudioProcessor
+          import androidx.media3.effect.Presentation
+          import androidx.media3.transformer.Composition
+          import androidx.media3.transformer.DefaultEncoderFactory
+          import androidx.media3.transformer.EditedMediaItem
+          import androidx.media3.transformer.Effects
+          import androidx.media3.transformer.ExportException
+          import androidx.media3.transformer.ExportResult
+          import androidx.media3.transformer.ProgressHolder
+          import androidx.media3.transformer.Transformer
+          import androidx.media3.transformer.VideoEncoderSettings
+          import java.io.File
+
+          typealias Done = (Boolean, String, Uri?, String) -> Unit
+
+          class MainActivity : ComponentActivity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent { MaterialTheme { Surface(Modifier.fillMaxSize()) { Screen() } } }
+              }
+
+              @Composable
+              private fun Screen() {
+                  var uri by remember { mutableStateOf<Uri?>(null) }
+                  var isVideo by remember { mutableStateOf(false) }
+                  var fill by remember { mutableStateOf(false) }
+                  var bg by remember { mutableStateOf(0) }
+                  var resIdx by remember { mutableStateOf(1) }
+                  var sharp by remember { mutableStateOf(35f) }
+                  var png by remember { mutableStateOf(false) }
+                  var brIdx by remember { mutableStateOf(1) }
+                  var busy by remember { mutableStateOf(false) }
+                  var pct by remember { mutableStateOf(0) }
+                  var msg by remember { mutableStateOf("") }
+                  var saved by remember { mutableStateOf<Uri?>(null) }
+                  var savedMime by remember { mutableStateOf("") }
+
+                  val resList = listOf(1080, 1440, 2160)
+                  val brList = listOf(8, 12, 20)
+
+                  val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { u ->
+                      if (u != null) {
+                          uri = u
+                          isVideo = contentResolver.getType(u)?.startsWith("video") == true
+                          saved = null
+                          msg = if (isVideo) "Đã chọn video" else "Đã chọn ảnh"
+                      }
+                  }
+
+                  val finish: Done = { _, text, out, mime ->
+                      busy = false
+                      msg = text
+                      saved = out
+                      savedMime = mime
+                  }
+
+                  Column(
+                      Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                      Text("Story HD", style = MaterialTheme.typography.headlineMedium)
+                      Text("Xuất ảnh / video chuẩn 9:16 chất lượng cao để Facebook story nét nhất có thể.")
+
+                      Button(
+                          onClick = {
+                              pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                          },
+                          enabled = !busy,
+                          modifier = Modifier.fillMaxWidth()
+                      ) { Text("Chọn ảnh hoặc video") }
+
+                      if (uri != null) Text(msg)
+
+                      Text("Cách lấp khung")
+                      Chips(listOf("Giữ nguyên", "Phóng đầy (cắt mép)"), if (fill) 1 else 0) { fill = it == 1 }
+
+                      if (!fill) {
+                          if (isVideo) {
+                              Text("Video: phần thừa sẽ là nền đen.")
+                          } else {
+                              Text("Nền phần thừa")
+                              Chips(listOf("Mờ", "Đen", "Trắng"), bg) { bg = it }
+                          }
+                      }
+
+                      if (!isVideo) {
+                          Text("Độ phân giải ảnh")
+                          Chips(listOf("1080×1920", "1440×2560", "2160×3840"), resIdx) { resIdx = it }
+                          Text("Làm nét: ${sharp.toInt()}%")
+                          Slider(value = sharp, onValueChange = { sharp = it }, valueRange = 0f..100f)
+                          Text("Định dạng")
+                          Chips(listOf("JPEG 98%", "PNG"), if (png) 1 else 0) { png = it == 1 }
+                      } else {
+                          Text("Video xuất 1080×1920, H.264. Bitrate")
+                          Chips(listOf("8 Mbps", "12 Mbps", "20 Mbps"), brIdx) { brIdx = it }
+                      }
+
+                      Button(
+                          onClick = {
+                              val u = uri ?: return@Button
+                              busy = true
+                              pct = 0
+                              saved = null
+                              if (isVideo) {
+                                  msg = "Đang xuất video… đừng thoát app nhé"
+                                  exportVideo(u, fill, brList[brIdx], { pct = it }, finish)
+                              } else {
+                                  msg = "Đang xử lý ảnh…"
+                                  exportImage(u, fill, bg, resList[resIdx], sharp / 100f * 0.6f, png, finish)
+                              }
+                          },
+                          enabled = uri != null && !busy,
+                          modifier = Modifier.fillMaxWidth()
+                      ) { Text("Xuất file") }
+
+                      if (busy) {
+                          if (isVideo) LinearProgressIndicator(progress = { pct / 100f }, modifier = Modifier.fillMaxWidth())
+                          else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                          if (isVideo) Text("$pct%")
+                      } else if (uri != null && msg.isNotEmpty() && saved != null) {
+                          Text(msg)
+                      } else if (!busy && saved == null && msg.startsWith("Lỗi")) {
+                          Text(msg)
+                      }
+
+                      val s = saved
+                      if (s != null) {
+                          OutlinedButton(onClick = { share(s, savedMime) }, modifier = Modifier.fillMaxWidth()) {
+                              Text("Chia sẻ (chọn Facebook → Story)")
+                          }
+                      }
+
+                      Text(
+                          "Mẹo: bật Facebook → Cài đặt → Phương tiện → \"Tải lên chất lượng HD\". " +
+                              "Đăng thẳng từ file vừa xuất, đừng gửi qua Zalo/Messenger vì bị nén thêm."
+                      )
+                  }
+              }
+
+              // ---------------- ẢNH ----------------
+
+              private fun exportImage(
+                  u: Uri, fill: Boolean, bg: Int, w: Int, amt: Float, png: Boolean, done: Done
+              ) {
+                  Thread {
+                      try {
+                          val h = w * 16 / 9
+                          val src = ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, u)) { d, info, _ ->
+                              d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                              var s = 1
+                              while (info.size.width / (s * 2) >= w && info.size.height / (s * 2) >= h) s *= 2
+                              d.setTargetSampleSize(s)
+                          }
+                          val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                          val c = Canvas(out)
+                          val p = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG)
+                          val sw = src.width.toFloat()
+                          val sh = src.height.toFloat()
+                          val cover = maxOf(w / sw, h / sh)
+                          val fit = minOf(w / sw, h / sh)
+                          fun rect(k: Float, cw: Float, ch: Float) =
+                              RectF((cw - sw * k) / 2, (ch - sh * k) / 2, (cw + sw * k) / 2, (ch + sh * k) / 2)
+
+                          if (fill) {
+                              c.drawBitmap(src, null, rect(cover, w.toFloat(), h.toFloat()), p)
+                          } else {
+                              when (bg) {
+                                  0 -> {
+                                      val tiny = Bitmap.createBitmap(24, 43, Bitmap.Config.ARGB_8888)
+                                      val tk = maxOf(24f / sw, 43f / sh)
+                                      Canvas(tiny).drawBitmap(src, null, rect(tk, 24f, 43f), p)
+                                      c.drawBitmap(tiny, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), p)
+                                      c.drawColor(0x40000000)
+                                  }
+                                  1 -> c.drawColor(Color.BLACK)
+                                  else -> c.drawColor(Color.WHITE)
+                              }
+                              c.drawBitmap(src, null, rect(fit, w.toFloat(), h.toFloat()), p)
+                          }
+                          if (amt > 0f) sharpen(out, amt)
+                          val uriOut = saveImage(out, png)
+                          val mime = if (png) "image/png" else "image/jpeg"
+                          runOnUiThread {
+                              if (uriOut != null) done(true, "Xong! Đã lưu vào Ảnh/Pictures/StoryHD (${w}×${h})", uriOut, mime)
+                              else done(false, "Lỗi: không lưu được ảnh", null, "")
+                          }
+                      } catch (t: Throwable) {
+                          runOnUiThread { done(false, "Lỗi: ${t.message}", null, "") }
+                      }
+                  }.start()
+              }
+
+              private fun sharpen(b: Bitmap, a: Float) {
+                  val w = b.width
+                  val h = b.height
+                  val s = IntArray(w * h)
+                  b.getPixels(s, 0, w, 0, 0, w, h)
+                  val o = s.copyOf()
+                  val k = 1 + 4 * a
+                  for (y in 1 until h - 1) {
+                      for (x in 1 until w - 1) {
+                          val i = y * w + x
+                          val c = s[i]
+                          val l = s[i - 1]
+                          val r = s[i + 1]
+                          val u = s[i - w]
+                          val d = s[i + w]
+                          var res = 0xFF shl 24
+                          var sh = 16
+                          while (sh >= 0) {
+                              val v = ((c shr sh) and 255) * k -
+                                  a * (((l shr sh) and 255) + ((r shr sh) and 255) + ((u shr sh) and 255) + ((d shr sh) and 255))
+                              res = res or (v.toInt().coerceIn(0, 255) shl sh)
+                              sh -= 8
+                          }
+                          o[i] = res
+                      }
+                  }
+                  b.setPixels(o, 0, w, 0, 0, w, h)
+              }
+
+              private fun saveImage(b: Bitmap, png: Boolean): Uri? {
+                  val name = "story_${System.currentTimeMillis()}." + if (png) "png" else "jpg"
+                  val v = ContentValues().apply {
+                      put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                      put(MediaStore.Images.Media.MIME_TYPE, if (png) "image/png" else "image/jpeg")
+                      put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/StoryHD")
+                      put(MediaStore.Images.Media.IS_PENDING, 1)
+                  }
+                  val u = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v) ?: return null
+                  contentResolver.openOutputStream(u)?.use {
+                      b.compress(if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 98, it)
+                  }
+                  v.clear()
+                  v.put(MediaStore.Images.Media.IS_PENDING, 0)
+                  contentResolver.update(u, v, null, null)
+                  return u
+              }
+
+              // ---------------- VIDEO ----------------
+
+              private fun exportVideo(u: Uri, fill: Boolean, mbps: Int, onProgress: (Int) -> Unit, done: Done) {
+                  val out = File(cacheDir, "story_${System.currentTimeMillis()}.mp4")
+                  var running = true
+                  val layout = if (fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT
+                  val presentation = Presentation.createForWidthAndHeight(1080, 1920, layout)
+                  val encoder = DefaultEncoderFactory.Builder(this)
+                      .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(mbps * 1_000_000).build())
+                      .build()
+                  val t = Transformer.Builder(this)
+                      .setVideoMimeType(MimeTypes.VIDEO_H264)
+                      .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                      .setEncoderFactory(encoder)
+                      .addListener(object : Transformer.Listener {
+                          override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                              running = false
+                              Thread {
+                                  val saved = saveVideo(out)
+                                  out.delete()
+                                  runOnUiThread {
+                                      if (saved != null) done(true, "Xong! Đã lưu vào Phim/Movies/StoryHD (1080×1920)", saved, "video/mp4")
+                                      else done(false, "Lỗi: không lưu được video", null, "")
+                                  }
+                              }.start()
+                          }
+
+                          override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+                              running = false
+                              out.delete()
+                              done(false, "Lỗi: ${exportException.message}", null, "")
+                          }
+                      })
+                      .build()
+                  val item = EditedMediaItem.Builder(MediaItem.fromUri(u))
+                      .setEffects(Effects(emptyList<AudioProcessor>(), listOf<Effect>(presentation)))
+                      .build()
+                  t.start(item, out.absolutePath)
+
+                  val holder = ProgressHolder()
+                  val handler = Handler(Looper.getMainLooper())
+                  val poll = object : Runnable {
+                      override fun run() {
+                          if (!running) return
+                          if (t.getProgress(holder) == Transformer.PROGRESS_STATE_AVAILABLE) onProgress(holder.progress)
+                          handler.postDelayed(this, 400)
+                      }
+                  }
+                  handler.post(poll)
+              }
+
+              private fun saveVideo(f: File): Uri? {
+                  val v = ContentValues().apply {
+                      put(MediaStore.Video.Media.DISPLAY_NAME, f.name)
+                      put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                      put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/StoryHD")
+                      put(MediaStore.Video.Media.IS_PENDING, 1)
+                  }
+                  val u = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v) ?: return null
+                  contentResolver.openOutputStream(u)?.use { o -> f.inputStream().use { it.copyTo(o) } }
+                  v.clear()
+                  v.put(MediaStore.Video.Media.IS_PENDING, 0)
+                  contentResolver.update(u, v, null, null)
+                  return u
+              }
+
+              // ---------------- CHIA SẺ ----------------
+
+              private fun share(u: Uri, mime: String) {
+                  val i = Intent(Intent.ACTION_SEND).apply {
+                      type = mime
+                      putExtra(Intent.EXTRA_STREAM, u)
+                      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  }
+                  startActivity(Intent.createChooser(i, "Đăng lên…"))
+              }
+          }
+
+          @Composable
+          private fun Chips(items: List<String>, sel: Int, onSel: (Int) -> Unit) {
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  items.forEachIndexed { i, t ->
+                      FilterChip(selected = i == sel, onClick = { onSel(i) }, label = { Text(t) })
+                  }
+              }
+          }
+          STORYHD_EOF
+
+      - name: Tai Gradle 8.9 (tu thu lai, nhieu nguon)
+        run: |
+          ok=0
+          for round in 1 2 3; do
+            for url in \
+              https://github.com/gradle/gradle-distributions/releases/download/v8.9.0/gradle-8.9-bin.zip \
+              https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+              https://downloads.gradle.org/distributions/gradle-8.9-bin.zip; do
+              rm -f /tmp/gradle.zip
+              if curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/gradle.zip "$url" && unzip -tq /tmp/gradle.zip >/dev/null; then
+                ok=1; break
+              fi
+              echo "Nguon loi: $url"
+            done
+            [ "$ok" = 1 ] && break
+            sleep 20
+          done
+          [ "$ok" = 1 ] || { echo "Khong tai duoc Gradle"; exit 1; }
+          sudo unzip -q /tmp/gradle.zip -d /opt
+      - name: Build APK (tu thu lai neu loi mang)
+        run: |
+          for i in 1 2 3; do
+            if /opt/gradle-8.9/bin/gradle :app:assembleDebug --no-daemon --stacktrace; then exit 0; fi
+            echo "Thu lai lan $i"; sleep 20
+          done
+          exit 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StoryHD-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
